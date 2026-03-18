@@ -1,1 +1,5 @@
-# Dua_bo_game
+{
+  "name": "Đụa Bò Bahnar - Toán Học Vui",
+  "description": "Trò chơi giáo dục toán học dựa trên trò chơi dân gian của người Bahnar dành cho học sinh tiểu học.",
+  "requestFramePermissions": []
+}

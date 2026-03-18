@@ -1,0 +1,552 @@
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { motion, AnimatePresence } from 'motion/react';
+import { Trophy, Play, RotateCcw, CheckCircle2, XCircle, User, Waves, Settings, Plus, Trash2, Save, X } from 'lucide-react';
+
+// --- Sound Utility ---
+const playSound = (type: 'correct' | 'wrong' | 'move' | 'win') => {
+  let audio: HTMLAudioElement | null = null;
+  
+  switch (type) {
+    case 'correct':
+      audio = new Audio('/dung.mp3');
+      break;
+    case 'wrong':
+      audio = new Audio('/sai.mp3');
+      break;
+    case 'win':
+      audio = new Audio('/dich.mp3');
+      break;
+    case 'move':
+      // Keep synthesized splash sound for movement
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioContextClass) return;
+      const ctx = new AudioContextClass();
+      const bufferSize = ctx.sampleRate * 0.2;
+      const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+      const data = buffer.getChannelData(0);
+      for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+      const noise = ctx.createBufferSource();
+      noise.buffer = buffer;
+      const filter = ctx.createBiquadFilter();
+      filter.type = 'lowpass';
+      filter.frequency.setValueAtTime(1000, ctx.currentTime);
+      const noiseGain = ctx.createGain();
+      noiseGain.gain.setValueAtTime(0.05, ctx.currentTime);
+      noiseGain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.2);
+      noise.connect(filter);
+      filter.connect(noiseGain);
+      noiseGain.connect(ctx.destination);
+      noise.start();
+      return;
+  }
+
+  if (audio) {
+    audio.play().catch(err => console.log("Sound effect play failed:", err));
+  }
+};
+
+// --- Question Bank ---
+const QUESTIONS = [
+  { q: "36 + 27", a: 63 },
+  { q: "84 - 29", a: 55 },
+  { q: "7 × 6", a: 42 },
+  { q: "63 ÷ 9", a: 7 },
+  { q: "45 + 38", a: 83 },
+  { q: "92 - 47", a: 45 },
+  { q: "8 × 4", a: 32 },
+  { q: "72 ÷ 8", a: 9 },
+  { q: "15 + 66", a: 81 },
+  { q: "51 - 18", a: 33 },
+  { q: "9 × 3", a: 27 },
+  { q: "54 ÷ 6", a: 9 },
+  { q: "28 + 49", a: 77 },
+  { q: "70 - 35", a: 35 },
+  { q: "6 × 8", a: 48 },
+  { q: "40 ÷ 5", a: 8 },
+  { q: "19 + 72", a: 91 },
+  { q: "83 - 56", a: 27 },
+  { q: "7 × 7", a: 49 },
+  { q: "48 ÷ 4", a: 12 },
+  { q: "55 + 26", a: 81 },
+  { q: "90 - 41", a: 49 },
+  { q: "4 × 9", a: 36 },
+  { q: "81 ÷ 9", a: 9 },
+  { q: "37 + 44", a: 81 },
+  { q: "65 - 28", a: 37 },
+  { q: "5 × 7", a: 35 },
+  { q: "32 ÷ 4", a: 8 },
+  { q: "12 + 88", a: 100 },
+  { q: "100 - 45", a: 55 }
+];
+
+// --- Components ---
+
+const OxSprite = ({ team }: { team: string }) => {
+  const imgSrc = team === 'A' ? '/nam.png' : '/nu.png';
+  return (
+    <div className="relative flex items-center">
+      <motion.img
+        src={imgSrc}
+        alt={`Đội ${team}`}
+        referrerPolicy="no-referrer"
+        className="w-36 h-auto drop-shadow-2xl"
+        animate={{ 
+          y: [0, -8, 0],
+          rotate: team === 'A' ? [-1, 1, -1] : [1, -1, 1]
+        }}
+        transition={{ repeat: Infinity, duration: 0.6, ease: "easeInOut" }}
+      />
+      <div className={`ml-2 px-4 py-1 rounded-full font-bold text-white shadow-lg text-xl ${team === 'A' ? 'bg-blue-600 border-2 border-white' : 'bg-red-600 border-2 border-white'}`}>
+        Đội {team}
+      </div>
+    </div>
+  );
+};
+
+export default function App() {
+  const [questionsList, setQuestionsList] = useState(QUESTIONS);
+  const [usedIndices, setUsedIndices] = useState<number[]>([]);
+  const [isTeacherMode, setIsTeacherMode] = useState(false);
+  const [newQ, setNewQ] = useState('');
+  const [newA, setNewA] = useState('');
+
+  const [isMuted, setIsMuted] = useState(false);
+  const [volume, setVolume] = useState(0.4);
+  const audioRef = useRef<HTMLAudioElement>(null);
+
+  const [gameState, setGameState] = useState<'start' | 'playing' | 'won'>('start');
+  const [teamATurn, setTeamATurn] = useState(true);
+  const [posA, setPosA] = useState(0);
+  const [posB, setPosB] = useState(0);
+  const [currentQ, setCurrentQ] = useState(questionsList[0]);
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const [input, setInput] = useState('');
+  const [feedback, setFeedback] = useState<{ text: string, type: 'success' | 'error' | null }>({ text: '', type: null });
+  const [attempts, setAttempts] = useState(0);
+  const [winner, setWinner] = useState<string | null>(null);
+  
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const WIN_POS = 80; 
+  const stepSize = Math.max(10, 80 / Math.ceil(questionsList.length / 1.5));
+
+  const nextQuestion = useCallback(() => {
+    if (questionsList.length === 0) return;
+    
+    let availableIndices = questionsList.map((_, i) => i).filter(i => !usedIndices.includes(i));
+    
+    if (availableIndices.length === 0) {
+      availableIndices = questionsList.map((_, i) => i);
+      setUsedIndices([]);
+    }
+
+    const randomIndex = availableIndices[Math.floor(Math.random() * availableIndices.length)];
+    setCurrentQ(questionsList[randomIndex]);
+    setCurrentIndex(randomIndex);
+    setAttempts(0);
+    setInput('');
+  }, [questionsList, usedIndices]);
+
+  const addQuestion = () => {
+    if (!newQ.trim() || !newA.trim()) return;
+    const updated = [...questionsList, { q: newQ, a: parseInt(newA) }];
+    setQuestionsList(updated);
+    setUsedIndices([]); // Reset used pool when list changes
+    setNewQ('');
+    setNewA('');
+  };
+
+  const deleteQuestion = (index: number) => {
+    const updated = questionsList.filter((_, i) => i !== index);
+    setQuestionsList(updated);
+    setUsedIndices([]); // Reset used pool when list changes
+  };
+
+  const startGame = () => {
+    if (audioRef.current) {
+      audioRef.current.play().catch(err => console.log("Audio play failed:", err));
+    }
+    setGameState('playing');
+    setPosA(0);
+    setPosB(0);
+    setTeamATurn(true);
+    setWinner(null);
+    setFeedback({ text: '', type: null });
+    setUsedIndices([]); // Reset used pool at start of new game
+    
+    // Pick first question manually to avoid dependency issues in startGame
+    const randomIndex = Math.floor(Math.random() * questionsList.length);
+    setCurrentQ(questionsList[randomIndex]);
+    setCurrentIndex(randomIndex);
+    setAttempts(0);
+    setInput('');
+  };
+
+  const handleAnswer = (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!input.trim()) return;
+
+    const isCorrect = parseInt(input) === currentQ.a;
+
+    if (isCorrect) {
+      playSound('correct');
+      setFeedback({ text: 'Chính xác! Bò tiến lên!', type: 'success' });
+      setUsedIndices(prev => [...prev, currentIndex]);
+      
+      if (teamATurn) {
+        const newPos = posA + stepSize;
+        setPosA(newPos);
+        playSound('move');
+        if (newPos >= WIN_POS) {
+          endGame('A');
+          return;
+        }
+      } else {
+        const newPos = posB + stepSize;
+        setPosB(newPos);
+        playSound('move');
+        if (newPos >= WIN_POS) {
+          endGame('B');
+          return;
+        }
+      }
+      
+      setTimeout(() => {
+        setFeedback({ text: '', type: null });
+        nextQuestion();
+        setTeamATurn(!teamATurn);
+      }, 1200);
+
+    } else {
+      playSound('wrong');
+      const newAttempts = attempts + 1;
+      setAttempts(newAttempts);
+
+      if (newAttempts >= 2) {
+        setFeedback({ text: 'Cả hai đội đều sai! Câu hỏi mới.', type: 'error' });
+        setTimeout(() => {
+          setFeedback({ text: '', type: null });
+          nextQuestion();
+          setTeamATurn(!teamATurn);
+        }, 1200);
+      } else {
+        setFeedback({ text: 'Sai rồi! Lượt của đội tiếp theo.', type: 'error' });
+        setTimeout(() => {
+          setFeedback({ text: '', type: null });
+          setTeamATurn(!teamATurn);
+          setInput('');
+        }, 1200);
+      }
+    }
+  };
+
+  const endGame = (team: string) => {
+    playSound('win');
+    setWinner(team);
+    setGameState('won');
+  };
+
+  useEffect(() => {
+    if (gameState === 'playing' && inputRef.current) {
+      inputRef.current.focus();
+    }
+  }, [gameState, teamATurn]);
+
+  useEffect(() => {
+    const handleFirstInteraction = () => {
+      if (audioRef.current && audioRef.current.paused && !isMuted) {
+        audioRef.current.play().catch(() => {});
+      }
+      window.removeEventListener('click', handleFirstInteraction);
+      window.removeEventListener('keydown', handleFirstInteraction);
+    };
+    window.addEventListener('click', handleFirstInteraction);
+    window.addEventListener('keydown', handleFirstInteraction);
+    return () => {
+      window.removeEventListener('click', handleFirstInteraction);
+      window.removeEventListener('keydown', handleFirstInteraction);
+    };
+  }, [isMuted]);
+
+  useEffect(() => {
+    if (audioRef.current) {
+      audioRef.current.volume = isMuted ? 0 : volume;
+    }
+  }, [volume, isMuted]);
+
+  const toggleMute = () => {
+    if (audioRef.current) {
+      if (isMuted) {
+        audioRef.current.play().catch(err => console.log("Audio play failed:", err));
+      } else {
+        audioRef.current.pause();
+      }
+      setIsMuted(!isMuted);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-sky-100 font-sans overflow-hidden flex flex-col">
+      <audio ref={audioRef} src="/nhacnen.mp3" loop />
+      {/* Header */}
+      <header className="bg-white/80 backdrop-blur-sm py-2 px-3 shadow-sm flex justify-between items-center z-10">
+  <h1 className="text-lg font-bold text-orange-600 tracking-tight uppercase">
+    Đụa Bò Bahnar
+  </h1>
+
+  <div className="flex gap-2 items-center">
+    <div className="flex items-center gap-1 bg-gray-100 rounded-full px-2 py-1">
+      <button 
+        onClick={toggleMute}
+        className="text-gray-500 hover:text-orange-600 transition-colors"
+        title={isMuted ? "Bật nhạc" : "Tắt nhạc"}
+      >
+        {isMuted ? (
+          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 5L6 9H2v6h4l5 4V5z"></path><line x1="23" y1="9" x2="17" y2="15"></line><line x1="17" y1="9" x2="23" y2="15"></line></svg>
+        ) : (
+          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 5L6 9H2v6h4l5 4V5z"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path></svg>
+        )}
+      </button>
+      <input 
+        type="range" 
+        min="0" 
+        max="1" 
+        step="0.01" 
+        value={volume} 
+        onChange={(e) => setVolume(parseFloat(e.target.value))}
+        className="w-16 h-1 bg-orange-200 rounded-lg appearance-none cursor-pointer accent-orange-500"
+      />
+    </div>
+    <button 
+      onClick={() => setIsTeacherMode(true)}
+      className="p-1.5 text-gray-500 hover:text-orange-600 hover:bg-orange-50 rounded-full transition-colors"
+      title="Chế độ giáo viên"
+    >
+      <Settings size={20} />
+    </button>
+
+    <div className={`px-3 py-0.5 text-sm rounded-full font-bold transition-all ${
+      teamATurn ? 'bg-blue-500 text-white scale-105 shadow-md' : 'bg-gray-200 text-gray-500'
+    }`}>
+      Đội A
+    </div>
+
+    <div className={`px-3 py-0.5 text-sm rounded-full font-bold transition-all ${
+      !teamATurn ? 'bg-red-500 text-white scale-105 shadow-md' : 'bg-gray-200 text-gray-500'
+    }`}>
+      Đội B
+    </div>
+  </div>
+</header>
+
+      {/* Main Game Area */}
+      <main 
+        className="flex-1 relative flex flex-col"
+        style={{
+          backgroundImage: "url('/nen.png')", 
+          backgroundSize: "cover",
+          backgroundPosition: "center",
+          backgroundRepeat: "no-repeat"
+        }}
+      >
+        
+        {/* The Lake/Track */}
+        <div className="flex-1 relative overflow-hidden border-y-4 border-amber-800/20 bg-transparent">
+                {/* Finish Line (Visual Gate) */}
+          <div className="absolute right-[12%] top-0 bottom-0 w-1 bg-white/30 backdrop-blur-[2px] z-10" />
+
+          {/* Oxen */}
+          <div className="absolute inset-0 flex flex-col justify-around py-8 px-[5%]">
+            {/* Team A Ox */}
+            <motion.div 
+              animate={{ x: `${posA}%` }}
+              transition={{ type: 'spring', stiffness: 40 }}
+              className="relative z-20"
+            >
+              <OxSprite team="A" />
+            </motion.div>
+
+            {/* Team B Ox */}
+            <motion.div 
+              animate={{ x: `${posB}%` }}
+              transition={{ type: 'spring', stiffness: 40 }}
+              className="relative z-20"
+            >
+              <OxSprite team="B" />
+            </motion.div>
+          </div>
+        </div>
+
+        {/* UI Controls - SMALLER & TRANSPARENT */}
+        <div className="h-28 bg-white/40 backdrop-blur-md p-2 flex flex-col items-center justify-center gap-1 shadow-[0_-10px_20px_rgba(0,0,0,0.1)] z-20">
+          {gameState === 'start' && (
+            <motion.button
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+              onClick={startGame}
+              className="flex items-center gap-2 bg-orange-500 hover:bg-orange-600 text-white px-6 py-2 rounded-xl text-lg font-black shadow-xl transition-colors"
+            >
+              <Play size={24} fill="currentColor" />
+              BẮT ĐẦU CHƠI
+            </motion.button>
+          )}
+
+          {gameState === 'playing' && (
+            <div className="w-full max-w-md flex flex-col items-center gap-1">
+              <div className="text-center">
+                <h2 className="text-4xl font-black text-gray-900 drop-shadow-sm">
+                  {currentQ.q} = ?
+                </h2>
+              </div>
+
+              <form onSubmit={handleAnswer} className="flex gap-2 w-full">
+                <input
+                  ref={inputRef}
+                  type="number"
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  placeholder="Đáp án..."
+                  className="flex-1 text-xl p-1.5 border-2 border-white rounded-lg focus:border-orange-500 outline-none font-bold text-center bg-white/90 shadow-inner"
+                />
+                <button
+                  type="submit"
+                  className="bg-green-600 hover:bg-green-700 text-white px-6 py-1.5 rounded-lg text-lg font-black shadow-md transition-colors"
+                >
+                  GỬI
+                </button>
+              </form>
+
+              <AnimatePresence mode="wait">
+                {feedback.type && (
+                  <motion.div
+                    initial={{ opacity: 0, scale: 0.9 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    exit={{ opacity: 0, scale: 0.9 }}
+                    className={`flex items-center gap-2 text-base font-bold ${feedback.type === 'success' ? 'text-green-600' : 'text-red-600'}`}
+                  >
+                    {feedback.type === 'success' ? <CheckCircle2 size={18} /> : <XCircle size={18} />}
+                    {feedback.text}
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+          )}
+
+          {gameState === 'won' && (
+            <motion.div 
+              initial={{ scale: 0.8, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              className="flex flex-col items-center gap-1"
+            >
+              <div className="flex items-center gap-2 text-xl font-black text-orange-600">
+                <Trophy size={28} className="text-yellow-500" />
+                ĐỘI {winner} THẮNG CUỘC!
+              </div>
+              <button
+                onClick={startGame}
+                className="flex items-center gap-2 bg-gray-800 hover:bg-black text-white px-4 py-1.5 rounded-lg text-sm font-bold shadow-lg transition-colors"
+              >
+                <RotateCcw size={16} />
+                CHƠI LẠI
+              </button>
+            </motion.div>
+          )}
+        </div>
+      </main>
+
+      {/* Teacher Mode Modal */}
+      <AnimatePresence>
+        {isTeacherMode && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+          >
+            <motion.div 
+              initial={{ scale: 0.9, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.9, y: 20 }}
+              className="bg-white rounded-3xl w-full max-w-2xl max-h-[80vh] flex flex-col shadow-2xl overflow-hidden"
+            >
+              <div className="p-6 border-b flex justify-between items-center bg-orange-50">
+                <div className="flex items-center gap-3">
+                  <Settings className="text-orange-600" />
+                  <h2 className="text-2xl font-black text-gray-800 uppercase tracking-tight">Quản lý câu hỏi</h2>
+                </div>
+                <button onClick={() => setIsTeacherMode(false)} className="p-2 hover:bg-orange-100 rounded-full transition-colors">
+                  <X size={24} />
+                </button>
+              </div>
+
+              <div className="flex-1 overflow-y-auto p-6 space-y-6">
+                {/* Add New Question */}
+                <div className="bg-gray-50 p-4 rounded-2xl border-2 border-dashed border-gray-200">
+                  <h3 className="text-sm font-bold text-gray-500 uppercase mb-3">Thêm câu hỏi mới</h3>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <input 
+                      type="text" 
+                      placeholder="Câu hỏi (VD: 5 + 5)" 
+                      value={newQ}
+                      onChange={(e) => setNewQ(e.target.value)}
+                      className="p-3 rounded-xl border-2 border-gray-200 focus:border-orange-500 outline-none font-bold"
+                    />
+                    <div className="flex gap-2">
+                      <input 
+                        type="number" 
+                        placeholder="Đáp án" 
+                        value={newA}
+                        onChange={(e) => setNewA(e.target.value)}
+                        className="flex-1 p-3 rounded-xl border-2 border-gray-200 focus:border-orange-500 outline-none font-bold"
+                      />
+                      <button 
+                        onClick={addQuestion}
+                        className="bg-orange-500 text-white p-3 rounded-xl hover:bg-orange-600 transition-colors shadow-lg"
+                      >
+                        <Plus size={24} />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Question List */}
+                <div className="space-y-2">
+                  <h3 className="text-sm font-bold text-gray-500 uppercase">Danh sách câu hỏi ({questionsList.length})</h3>
+                  {questionsList.map((q, idx) => (
+                    <div key={idx} className="flex items-center justify-between p-4 bg-white border-2 border-gray-100 rounded-2xl hover:border-orange-200 transition-colors group">
+                      <div className="flex items-center gap-4">
+                        <span className="text-gray-400 font-mono text-xs w-6">{idx + 1}.</span>
+                        <span className="font-bold text-gray-700 text-lg">{q.q}</span>
+                        <span className="text-orange-600 font-black">= {q.a}</span>
+                      </div>
+                      <button 
+                        onClick={() => deleteQuestion(idx)}
+                        className="p-2 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all opacity-0 group-hover:opacity-100"
+                      >
+                        <Trash2 size={18} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="p-6 border-t bg-gray-50 flex justify-end">
+                <button 
+                  onClick={() => setIsTeacherMode(false)}
+                  className="bg-gray-800 text-white px-8 py-3 rounded-xl font-black shadow-lg hover:bg-black transition-colors"
+                >
+                  XONG
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
